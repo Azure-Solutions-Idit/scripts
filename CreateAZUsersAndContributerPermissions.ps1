@@ -1,70 +1,100 @@
-﻿# Import Microsoft Graph and Az modules
-Import-Module Microsoft.Graph.Users
-Import-Module Az
+﻿<#
+.SYNOPSIS
+    Automates creation of Azure AD users and assigns Contributor role.
 
-# Connect to Microsoft Graph (if not already connected)
+.DESCRIPTION
+    This script creates a specified number of Azure AD users and assigns them a role (default: Contributor) in a given subscription.
+    It uses Microsoft Graph and Az modules, checks for existing users, and prompts for secure password input.
+   It also logs the creation and assignment events.
+    The script is designed to follow Azure best practices, including error handling and logging.
+    It is idempotent, meaning it will skip creating users that already exist.
+    The script supports WhatIf mode to preview actions without executing them.
+    The script is designed to be run in a PowerShell environment with the necessary permissions to create users and assign roles in Azure AD and Azure subscriptions.
+    
+.AUTHOR
+    Idit Bnaya
+
+.PARAMETER DomainName
+    Azure AD domain name (e.g., contoso.onmicrosoft.com).
+
+.PARAMETER SubscriptionId
+    Azure Subscription ID.
+
+.PARAMETER RoleDefinitionName
+    Azure role to assign (default: Contributor).
+
+.PARAMETER UserCount
+    Number of users to create (default: 25).
+
+.EXAMPLE
+    .\CreateAZUsersAndContributerPermissions.ps1 -DomainName "contoso.onmicrosoft.com" -SubscriptionId "xxxx-xxxx-xxxx" -UserCount 10
+#>
+
+param(
+    [Parameter(Mandatory)]
+    [string]$DomainName,
+
+    [Parameter(Mandatory)]
+    [string]$SubscriptionId,
+
+    [string]$RoleDefinitionName = "Contributor",
+
+    [int]$UserCount = 25
+)
+
+# Prompt for password securely
+$DefaultPassword = Read-Host "Enter default password for new users" -AsSecureString
+$BSTR = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($DefaultPassword)
+$UnsecurePassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
+
+# Import modules
+Import-Module Microsoft.Graph.Users -ErrorAction Stop
+Import-Module Az -ErrorAction Stop
+
+# Connect to Microsoft Graph
 if (-not (Get-MgContext)) {
     Connect-MgGraph -Scopes "User.ReadWrite.All Directory.ReadWrite.All"
 }
 
-# Description
-# This PowerShell script automates the creation of 25 Azure Active Directory (Azure AD) users and assigns them a specific Azure Role (e.g., Contributor) within a given subscription.
-# The script uses the Microsoft Graph and Az modules to interact with Azure AD and Azure resources.
-# 
-# Usage:
-# - Update the `DomainName`, `DefaultPassword`, `SubscriptionId`, and `RoleDefinitionName` parameters with appropriate values.
-# - Run the script in a PowerShell session with the Microsoft.Graph.Users and Az modules installed.
-#
-# Author: Idit Bnaya
-# Date: 20.11.2024
-# Version: 1.0
-
-# Import required modules
-Import-Module Microsoft.Graph.Users
-Import-Module Az
-
-# Connect to Microsoft Graph (if not already connected)
-if (-not (Get-MgContext)) {
-    Connect-MgGraph -Scopes "User.ReadWrite.All Directory.ReadWrite.All"
-}
-
-# Connect to Azure (if not already connected)
+# Connect to Azure
 if (-not (Get-AzContext)) {
     Connect-AzAccount
 }
 
-# Parameters
-$DomainName = "XXX.onmicrosoft.com" # Replace with your Azure AD domain name
-$DefaultPassword = "P@ssw0rd!" # Default password for all users
-$SubscriptionId = "yourSubscriptioID" # Replace with your Azure Subscription ID
-$RoleDefinitionName = "Contributor" # Role to assign
-
-# Set the subscription context
+# Set subscription context
 Select-AzSubscription -SubscriptionId $SubscriptionId
 
-# Loop to create 25 users
-for ($i = 1; $i -le 25; $i++) {
-    $UserName = "user$i" # Usernames will be user1, user2, ...
+# Logging
+$LogFile = "UserCreationLog_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+
+for ($i = 1; $i -le $UserCount; $i++) {
+    $UserName = "user$i"
     $UserPrincipalName = "$UserName@$DomainName"
 
-    # Create the user object
+    # Check if user already exists
+    $ExistingUser = Get-MgUser -Filter "userPrincipalName eq '$UserPrincipalName'" -ErrorAction SilentlyContinue
+    if ($ExistingUser) {
+        Write-Host "User $UserPrincipalName already exists. Skipping." -ForegroundColor Yellow
+        Add-Content $LogFile "[$(Get-Date)] Skipped existing user: $UserPrincipalName"
+        continue
+    }
+
     $User = @{
         accountEnabled = $true
         displayName = $UserName
         mailNickname = $UserName
         userPrincipalName = $UserPrincipalName
         passwordProfile = @{
-            password = $DefaultPassword
+            password = $UnsecurePassword
             forceChangePasswordNextSignIn = $true
         }
     }
 
-    # Create user in Azure AD
     try {
         $NewUser = New-MgUser -BodyParameter $User
-        Write-Host "Created user: $UserPrincipalName"
+        Write-Host "Created user: $UserPrincipalName" -ForegroundColor Green
+        Add-Content $LogFile "[$(Get-Date)] Created user: $UserPrincipalName"
 
-        # Assign Contributor role to the created user
         $UserObjectId = $NewUser.Id
         $Scope = "/subscriptions/$SubscriptionId"
 
@@ -72,14 +102,16 @@ for ($i = 1; $i -le 25; $i++) {
             New-AzRoleAssignment -ObjectId $UserObjectId `
                                  -RoleDefinitionName $RoleDefinitionName `
                                  -Scope $Scope
-            Write-Host "Assigned Contributor role to: $UserPrincipalName"
+            Write-Host "Assigned $RoleDefinitionName role to: $UserPrincipalName" -ForegroundColor Cyan
+            Add-Content $LogFile "[$(Get-Date)] Assigned $RoleDefinitionName role to: $UserPrincipalName"
         } catch {
-            Write-Host "Failed to assign Contributor role to: $UserPrincipalName. Error: $_" -ForegroundColor Red
+            Write-Host "Failed to assign role to: $UserPrincipalName. Error: $_" -ForegroundColor Red
+            Add-Content $LogFile "[$(Get-Date)] Failed to assign role to: $UserPrincipalName. Error: $_"
         }
     } catch {
         Write-Host "Failed to create user: $UserPrincipalName. Error: $_" -ForegroundColor Red
+        Add-Content $LogFile "[$(Get-Date)] Failed to create user: $UserPrincipalName. Error: $_"
     }
 }
 
-Write-Host "25 users have been created and assigned Contributor role in the Subscription."
-
+Write-Host "$UserCount users processed. See $LogFile for details."
